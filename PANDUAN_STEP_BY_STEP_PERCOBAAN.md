@@ -1,4 +1,4 @@
-# PANDUAN EKSPERIMEN STEP-BY-STEP
+# Panduan Eksperimen Klasifikasi Aktivitas dengan ESP32
 ## SISTEM EDGE AI KLASIFIKASI AKTIVITAS MANUSIA (DIAM, JALAN, LARI) MENGGUNAKAN ESP32, SENSOR MPU-6050, OLED SSD1306, BUZZER, DAN CLOUD IOT RESLAB CSUB
 
 ---
@@ -33,19 +33,18 @@
      - `GND` -> `GND`
      - `SDA` -> `GPIO 21`
      - `SCL` -> `GPIO 22`
-  2. Buka dan upload firmware data logger: [`ESP32_Data_Logger_MPU6050.ino`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/ESP32_Data_Logger_MPU6050/ESP32_Data_Logger_MPU6050.ino).
+  2. Buka dan upload firmware data logger: [`ESP32_Data_Logger_MPU6050.ino`](ESP32_Data_Logger_MPU6050/ESP32_Data_Logger_MPU6050.ino).
   3. Genggam modul ESP32 di telapak tangan (*handheld*) dengan layar OLED menghadap ke atas secara wajar dan rileks.
   4. Jalankan script perekam otomatis di Command Prompt / Terminal:
      ```bash
-     cd "E:\SMT 7\Edge Intelligent and Computing\TUGAS BESAR"
      python record_dataset.py
      ```
-  5. Masukkan ID Subjek (misal: `S01`), pilih posisi sensor, pilih jenis aktivitas, dan masukkan durasi (disarankan 60 detik = 3.000 sampel).
+  5. Masukkan ID samaran yang konsisten per peserta, ID sesi, posisi, jenis aktivitas, dan durasi. Gunakan ID berbeda untuk setiap peserta.
   6. **SOP Gerakan Fisik:**
      - **DIAM:** Duduk santai di kursi atau berdiri tenang tanpa gerakan ($a_x, a_y \approx 0g, a_z \approx 0.98g$).
      - **JALAN:** Berjalan kaki santai dengan irama langkah normal 1.6 - 2.0 Hz di koridor ($\pm 0.4g$ s.d. $\pm 0.8g$).
      - **LARI:** Melakukan jogging atau lari santai 2.8 - 3.5 Hz dengan hentakan kaki dinamis ($\pm 2.0g$ s.d. $\pm 3.5g$).
-  7. Data otomatis tersimpan rapi dan seimbang di [`dataset_aktivitas_primer.csv`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/dataset_aktivitas_primer.csv) dan [`.xlsx`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/dataset_aktivitas_primer.xlsx).
+  7. Rekaman tersimpan secara lokal di `data_local/rekaman_aktivitas.csv` dan, jika pustaka Excel tersedia, dalam format XLSX. CSV bawaan proyek berisi contoh sintetis.
 
 ---
 
@@ -54,16 +53,17 @@
 
 * **Tujuan:** Melatih model cerdas ringan yang mampu mengenali pola temporal akselerasi dan mengekspor bobotnya ke format C header.
 * **Prosedur Pelaksanaan:**
-  1. Buka notebook: [`Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb).
-  2. **Segmentasi Jendela Geser (*Sliding Window*):** Terapkan panjang jendela $W = 64$ sampel (1.28 detik pada 50 Hz) dengan langkah pergeseran $S = 32$ sampel (overlap 50%).
+  1. Buka notebook: [`Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb`](Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb).
+     Ubah `DATASET` menjadi `data_local/rekaman_aktivitas.csv` untuk eksperimen fisik.
+  2. **Pemisahan subjek:** Tahan seluruh rekaman satu subjek di setiap fold sebelum membentuk jendela di set latih dan uji. Terapkan panjang jendela $W = 64$ sampel (1.28 detik pada 50 Hz) dengan langkah pergeseran $S = 32$ sampel (overlap 50%).
   3. **Ekstraksi 20 Fitur Statistik:** Hitung 5 metrik statistik untuk $a_x, a_y, a_z$, dan $\text{mag} = \sqrt{a_x^2 + a_y^2 + a_z^2}$:
      - Mean ($\mu$), Standard Deviation ($\sigma$), Minimum ($\min$), Maximum ($\max$), dan Root Mean Square (RMS).
-  4. **Normalisasi:** Terapkan Z-Score Normalization: $z = (x - \mu) / \sigma$.
+  4. **Normalisasi:** Fit StandardScaler pada set latih setiap fold dan gunakan scaler tersebut pada set uji.
   5. **Pelatihan MLP Neural Network:**
      - Arsitektur: 20 input $\to$ Hidden 1 (16 ReLU) $\to$ Hidden 2 (8 ReLU) $\to$ Output (3 Softmax).
      - Optimizer: Adam, Loss: Cross-Entropy.
-  6. **Evaluasi:** Model meraih akurasi 100% pada data uji 405 sampel tanpa overfitting.
-  7. **Ekspor C Header:** Seluruh bobot matriks dan parameter skala diekspor otomatis menjadi berkas [`model_weights.h`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/model_weights.h).
+  6. **Evaluasi:** Catat metrik per fold, akurasi gabungan, dan matriks konfusi. Uji fisik akhir memakai peserta baru yang seluruh datanya disisihkan sejak awal.
+  7. **Ekspor C Header:** Jalankan `python train_and_export.py --dataset data_local/rekaman_aktivitas.csv`. Skrip melatih model ekspor dari seluruh input dan menyimpan `model_weights.h` di `data_local/training/`.
 
 ---
 
@@ -72,16 +72,14 @@
 
 * **Tujuan:** Menjalankan model machine learning secara on-device di mikrokontroler tanpa ketergantungan internet/cloud.
 * **Prosedur Pelaksanaan:**
-  1. Buka proyek firmware: [`ESP32_Edge_Inference_MPU6050.ino`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/ESP32_Edge_Inference_MPU6050/ESP32_Edge_Inference_MPU6050.ino).
-  2. Letakkan file [`model_weights.h`](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/ESP32_Edge_Inference_MPU6050/model_weights.h) pada folder yang sama.
+  1. Buka proyek firmware: [`ESP32_Edge_Inference_MPU6050.ino`](ESP32_Edge_Inference_MPU6050/ESP32_Edge_Inference_MPU6050.ino).
+  2. Untuk uji fisik, gunakan `model_weights.h` dari `data_local/training/` dalam salinan lokal folder firmware.
   3. Mekanisme Komputasi Edge pada Firmware:
      - Sensor dicuplik setiap 20 ms menggunakan timer non-blocking `millis()`.
      - Data ditampung pada circular ring buffer berukuran 64 sampel ($W=64$).
-     - Setiap 32 sampel baru ($S=32$), fungsi `extractFeatures()` menghitung 20 fitur secara lokal (~84.5 $\mu\text{s}$).
+     - Setiap 32 sampel baru ($S=32$), fungsi `extractFeatures()` menghitung 20 fitur secara lokal .
      - Fungsi `predictActivity()` menjalankan forward pass MLP deterministik pada FPU 240 MHz ESP32.
-  4. **Hasil Kinerja Edge:**
-     - Latensi inferensi lokal: **$215 - 245\ \mu\text{s}$ (kurang dari seperempat milidetik)**.
-     - Penggunaan RAM: Hanya 12.15% (39.8 KB dari 320 KB), buffer geser hanya 768 byte.
+  4. **Pengukuran perangkat:** Catat latensi dari serial dan penggunaan memori dari keluaran kompilasi. Tambahkan hasil pengukuran ke laporan pengujian.
 
 ---
 
@@ -92,7 +90,7 @@
 * **Pengkabelan Antarmuka Lokal:**
   - **OLED SSD1306 (0.96 inci I2C):** VCC -> 3V3, GND -> GND, SDA -> GPIO 21, SCL -> GPIO 22.
   - **Buzzer Aktif:** Pin (+) -> GPIO 18, Pin (-) -> GND.
-* **Hasil Pengujian Perangkat:**
+* **Tampilan yang diperiksa saat pengujian:**
   1. **Tampilan Layar OLED:**
      - Judul: `--- EDGE AI HAR ---`
      - Status Aktivitas: Huruf besar jelas (`DIAM`, `JALAN`, atau `LARI`).
@@ -113,13 +111,8 @@
   1. Login ke portal cloud: **`https://iot.reslab-csub.cloud/`**.
   2. Buka menu **Device Management > Devices**, klik **Add Device**, beri nama (misal: `ESP32-HAR-01`).
   3. Salin **Device Access Token** pada menu credentials perangkat.
-  4. Masukkan nama WiFi, password hotspot, dan Access Token pada file `ESP32_Edge_Inference_MPU6050.ino`:
-     ```cpp
-     const char* WIFI_SSID     = "NAMA_HOTSPOT_ANDA";
-     const char* WIFI_PASSWORD = "PASSWORD_HOTSPOT";
-     const char* DEVICE_ACCESS_TOKEN = "TOKEN_DARI_RESLAB";
-     ```
-  5. Upload firmware ke ESP32. ESP32 akan mengirimkan paket telemetri JSON via HTTP POST setiap 1.5 detik ke:
+  4. Isi `WIFI_SSID`, `WIFI_PASSWORD`, dan `DEVICE_ACCESS_TOKEN` di `ESP32_Edge_Inference_MPU6050.ino`.
+  5. Upload firmware. ESP32 mencoba mengirim telemetri melalui HTTPS setiap 1,5 detik.
      `https://iot.reslab-csub.cloud/api/v1/<TOKEN>/telemetry`
      ```json
      {
@@ -174,13 +167,13 @@
 ### LANGKAH 8: Checklist Material Pengumpulan (Upload File Terpisah)
 > **Ketentuan:** *Material yang dikumpulkan meliputi 4 kategori dan diupload satu-satu (tidak di-zip dalam 1 folder).*
 
-Pastikan Anda mengunggah 4 kategori berkas berikut secara terpisah pada portal tugas:
+Unggah empat kategori berikut secara terpisah pada portal tugas.
 
-| No | Material Tugas | Nama Berkas yang Diunggah | Status & Tautan Berkas |
-| :---: | :--- | :--- | :--- |
-| **1** | **File Dataset (.csv / .xlsx)** | `dataset_aktivitas_primer.csv`<br>atau `dataset_aktivitas_primer.xlsx` | [dataset_aktivitas_primer.csv](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/dataset_aktivitas_primer.csv)<br>[dataset_aktivitas_primer.xlsx](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/dataset_aktivitas_primer.xlsx) |
-| **2** | **File Notebook Pelatihan (.ipynb)** | `Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb` | [Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb) |
-| **3** | **Program ESP32 yang Digunakan** | `ESP32_Edge_Inference_MPU6050.ino`<br>dan `model_weights.h` | [ESP32_Edge_Inference_MPU6050.ino](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/ESP32_Edge_Inference_MPU6050.ino)<br>[model_weights.h](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/model_weights.h) |
-| **4** | **Laporan Pengujian Langsung** | `Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.pdf`<br>(atau versi Word `.docx`) | [Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.pdf](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.pdf)<br>[Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.docx](file:///e:/SMT%207/Edge%20Intelligent%20and%20Computing/TUGAS%20BESAR/Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.docx) |
+| Material | Berkas |
+| :--- | :--- |
+| **1. Dataset** | `rekaman_aktivitas.csv` atau `rekaman_aktivitas.xlsx` dari `data_local/`. |
+| **2. Notebook dan modul** | [Notebook pelatihan](Pelatihan_Model_Klasifikasi_Aktivitas_ESP32.ipynb) dan [`har_pipeline.py`](har_pipeline.py). |
+| **3. Program ESP32** | [Sketch inferensi](ESP32_Edge_Inference_MPU6050/ESP32_Edge_Inference_MPU6050.ino) dan `model_weights.h` yang dipakai saat pengujian. |
+| **4. Laporan pengujian** | [Laporan PDF](Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.pdf) atau [versi Word](Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.docx), dilengkapi hasil pengukuran perangkat. |
 
 > ⚠️ **Peringatan Penting:** Dilarang mengompres berkas ke dalam format `.zip` atau `.rar`. Unggah setiap berkas di atas satu per satu pada slot pengumpulan tugas LMS Anda.

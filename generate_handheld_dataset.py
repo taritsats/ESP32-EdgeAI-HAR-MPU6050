@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import os
+from pathlib import Path
 
 # Set random seed for reproducibility
 np.random.seed(42)
@@ -11,7 +11,7 @@ DURATION_SEC = 60   # 60 detik per aktivitas per sesi
 N_SAMPLES_PER_ACT = SAMPLING_RATE * DURATION_SEC  # 3000 sampel
 DT = 1.0 / SAMPLING_RATE  # 0.02 detik (20 ms)
 
-# Parameter subjek (3 subjek wanita, karakteristik handheld)
+# Parameter tiga profil simulasi untuk posisi genggam
 SUBJECTS = {
     'S01': {
         'nama': 'Taritsa (Subjek 1)',
@@ -171,9 +171,10 @@ print("\nDistribusi Sesi & Subjek:")
 print(df.groupby(['subjek', 'sesi', 'posisi', 'label']).size())
 
 # Simpan ke CSV dan Excel
-csv_path = "TUGAS BESAR/dataset_aktivitas_primer.csv"
-xlsx_path = "TUGAS BESAR/dataset_aktivitas_primer.xlsx"
-xlsx_natural_path = "TUGAS BESAR/dataset_aktivitas_primer_natural.xlsx"
+root = Path(__file__).resolve().parent
+csv_path = root / "dataset_aktivitas_primer.csv"
+xlsx_path = root / "dataset_aktivitas_primer.xlsx"
+xlsx_natural_path = root / "dataset_aktivitas_primer_natural.xlsx"
 
 print(f"\nMenyimpan ke CSV: {csv_path}...")
 df.to_csv(csv_path, index=False)

@@ -52,7 +52,7 @@ ax.text(3.3, 3.7, 'Display & Buzzer', fontsize=8.5, ha='center', rotation=-40, f
 
 # ESP32 -> Cloud Platform
 ax.annotate('', xy=(7.3, 5.5), xytext=(6.7, 5.5), arrowprops=dict(arrowstyle='->', lw=2.2, color='#1f77b4'))
-ax.text(7.0, 5.75, 'WiFi / HTTP', fontsize=8.5, ha='center', color='#1f77b4', fontweight='bold')
+ax.text(7.0, 5.75, 'Wi-Fi / HTTPS', fontsize=8.5, ha='center', color='#1f77b4', fontweight='bold')
 
 # Cloud Platform -> Notification
 ax.annotate('', xy=(8.8, 3.3), xytext=(8.8, 4.3), arrowprops=dict(arrowstyle='->', lw=2.2, color='#e74c3c'))
@@ -101,12 +101,12 @@ plt.close()
 print('Gambar 6 saved successfully.')
 
 # ==========================================
-# Gambar 7: Hasil Pengujian Langsung, OLED & Notifikasi Cloud
+# Gambar 7: Ilustrasi OLED, dasbor, dan notifikasi
 # ==========================================
 fig, axes = plt.subplots(1, 3, figsize=(12.5, 4.6))
 
 # Subplot 1: Tampilan Layar OLED SSD1306
-axes[0].set_facecolor('black')
+axes[0].add_patch(patches.Rectangle((0, 0), 128, 64, facecolor='#101820', edgecolor='none'))
 axes[0].set_xlim(0, 128)
 axes[0].set_ylim(0, 64)
 axes[0].axis('off')
@@ -145,7 +145,7 @@ msg_text = (
 axes[2].text(5, 5, msg_text, ha='center', va='center', bbox=msg_box, fontsize=8.5, family='monospace')
 axes[2].set_title('Notifikasi Real-Time (Telegram Bot)', fontsize=11, fontweight='bold')
 
-plt.suptitle('Pengujian Langsung Sistem: Visualisasi Edge, Cloud Dashboard, dan Notifikasi', fontsize=12, fontweight='bold')
+plt.suptitle('Ilustrasi OLED, Dasbor Telemetri, dan Notifikasi', fontsize=12, fontweight='bold')
 plt.tight_layout()
 plt.savefig('images/gambar7_hasil_uji_langsung_dan_dashboard.png', dpi=300)
 plt.close()

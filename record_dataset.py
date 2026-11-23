@@ -17,6 +17,7 @@ Cara Penggunaan:
 import sys
 import time
 import os
+from pathlib import Path
 import serial
 import serial.tools.list_ports
 
@@ -85,7 +86,18 @@ def main():
         durasi = 30
 
     target_sampel = durasi * 50  # 50 Hz -> 50 sampel per detik
-    output_filename = input("\nNama file penyimpanan [default: dataset_aktivitas_primer.csv]: ").strip() or "dataset_aktivitas_primer.csv"
+    root = Path(__file__).resolve().parent
+    default_path = root / "data_local" / "rekaman_aktivitas.csv"
+    output_name = input("\nNama file penyimpanan [default: data_local/rekaman_aktivitas.csv]: ").strip()
+    output_path = Path(output_name).resolve() if output_name else default_path
+    if output_path.suffix.lower() != ".csv":
+        print("[ERROR] Gunakan nama berkas dengan ekstensi .csv.")
+        return
+    if output_path == root / "dataset_aktivitas_primer.csv":
+        print("[ERROR] Pilih berkas lain agar demo sintetis dan rekaman nyata tetap terpisah.")
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_filename = str(output_path)
 
     # 3. Membuka Koneksi Serial ke ESP32
     print(f"\n[INFO] Menghubungkan ke {selected_port} pada baudrate 115200...")
@@ -170,7 +182,7 @@ def main():
     try:
         import pandas as pd
         df = pd.read_csv(output_filename)
-        xlsx_name = output_filename.replace(".csv", ".xlsx")
+        xlsx_name = output_path.with_suffix(".xlsx")
         df.to_excel(xlsx_name, index=False)
         print(f"[INFO] Berkas Excel diperbarui: {xlsx_name}")
         print(f"Total baris saat ini di dataset: {len(df)} baris")
