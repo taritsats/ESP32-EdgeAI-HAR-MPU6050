@@ -14,16 +14,63 @@ Cara Penggunaan:
 ======================================================================================
 """
 
-import sys
+import csv
+import math
 import time
-import os
 from pathlib import Path
 import serial
 import serial.tools.list_ports
 
+CSV_HEADER = ("timestamp_ms", "subjek", "sesi", "posisi", "ax", "ay", "az", "gx", "gy", "gz", "label")
+NO_SAMPLE_TIMEOUT = 5.0
+
+
 def get_available_ports():
-    ports = serial.tools.list_ports.comports()
-    return [p.device for p in ports]
+    return [port for port in serial.tools.list_ports.comports()
+            if "bluetooth" not in (port.description or "").casefold()]
+
+
+def parse_sensor_sample(line, label):
+    fields = line.split(",")
+    if len(fields) != len(CSV_HEADER) or fields[-1].casefold() != label:
+        return None
+    try:
+        milliseconds = int(fields[0])
+        measurements = [float(value) for value in fields[4:10]]
+    except ValueError:
+        return None
+    if (milliseconds < 0 or not all(math.isfinite(value) for value in measurements)
+            or not any(measurements[:3])):
+        return None
+    return milliseconds, fields[4:10], measurements[:3]
+
+
+def collect_samples(port, label, target):
+    samples = []
+    last_valid = time.monotonic()
+    try:
+        while len(samples) < target:
+            if time.monotonic() - last_valid >= NO_SAMPLE_TIMEOUT:
+                return samples, "Tidak ada sampel valid selama 5 detik. Cek port dan koneksi MPU-6050."
+            line = port.readline().decode("utf-8", errors="replace").strip()
+            if line.startswith("# MPU_ERROR:"):
+                return samples, line.removeprefix("# MPU_ERROR:").strip()
+            sample = parse_sensor_sample(line, label)
+            if sample is None:
+                continue
+
+            milliseconds, measurements, (ax, ay, az) = sample
+            if samples and milliseconds <= samples[-1][0]:
+                return samples, "Waktu sensor kembali ke awal. ESP32 mungkin baru saja reset."
+            samples.append((milliseconds, measurements))
+            last_valid = time.monotonic()
+            print(f"\r{len(samples)}/{target} | ax:{ax:+.2f} ay:{ay:+.2f} az:{az:+.2f} g",
+                  end="", flush=True)
+    except KeyboardInterrupt:
+        return samples, "Perekaman dihentikan pengguna."
+    except serial.SerialException as error:
+        return samples, f"Sambungan serial terputus: {error}"
+    return samples, None
 
 def main():
     print("=" * 65)
@@ -38,19 +85,22 @@ def main():
         return
 
     print("Daftar Port COM yang tersedia:")
-    for i, p in enumerate(ports):
-        print(f"  [{i + 1}] {p}")
+    for i, port in enumerate(ports, 1):
+        print(f"  [{i}] {port.device} - {port.description}")
 
     if len(ports) == 1:
-        selected_port = ports[0]
+        selected_port = ports[0].device
         print(f"Otomatis memilih port: {selected_port}")
     else:
         choice = input(f"Pilih nomor port (1-{len(ports)}): ").strip()
         try:
-            selected_port = ports[int(choice) - 1]
+            index = int(choice) - 1
+            if index < 0:
+                raise IndexError
+            selected_port = ports[index].device
         except (ValueError, IndexError):
-            selected_port = ports[0]
-            print(f"Pilihan tidak valid, menggunakan port default: {selected_port}")
+            print("[ERROR] Pilih nomor port USB ESP32 yang benar.")
+            return
 
     # 2. Input Metadata Eksperimen
     print("\n--- PENGATURAN METADATA PEREKAMAN ---")
@@ -85,6 +135,9 @@ def main():
     except ValueError:
         durasi = 30
 
+    if durasi <= 0:
+        print("[ERROR] Durasi perekaman harus lebih dari nol.")
+        return
     target_sampel = durasi * 50  # 50 Hz -> 50 sampel per detik
     root = Path(__file__).resolve().parent
     default_path = root / "data_local" / "rekaman_aktivitas.csv"
@@ -96,92 +149,43 @@ def main():
     if output_path == root / "dataset_aktivitas_primer.csv":
         print("[ERROR] Pilih berkas lain agar demo sintetis dan rekaman nyata tetap terpisah.")
         return
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_filename = str(output_path)
-
     # 3. Membuka Koneksi Serial ke ESP32
     print(f"\n[INFO] Menghubungkan ke {selected_port} pada baudrate 115200...")
     try:
-        ser = serial.Serial(selected_port, 115200, timeout=1)
-        time.sleep(2)  # Tunggu ESP32 reset/stabil
-        ser.reset_input_buffer()
-    except Exception as e:
-        print(f"[ERROR] Gagal membuka port serial: {e}")
+        with serial.Serial(selected_port, 115200, timeout=1) as port:
+            time.sleep(2)  # Tunggu ESP32 reset/stabil.
+            port.write(command_char.encode("ascii"))
+            print(f"\nSiapkan aktivitas {label_aktivitas.upper()} untuk {subjek} ({posisi}).")
+            for remaining in range(3, 0, -1):
+                print(f"Perekaman dimulai dalam... {remaining}")
+                time.sleep(1)
+            port.reset_input_buffer()
+            print("Mulai gerakan sekarang.")
+            samples, reason = collect_samples(port, label_aktivitas, target_sampel)
+    except serial.SerialException as error:
+        print(f"[ERROR] Gagal berkomunikasi dengan {selected_port}: {error}")
         return
 
-    # Kirim perintah label ke ESP32
-    ser.write(command_char.encode('utf-8'))
-    time.sleep(0.1)
+    if reason:
+        print(f"\n[PERINGATAN] {reason}")
+    if not samples:
+        print("[ERROR] Perekaman menghasilkan 0 sampel valid.")
+        return
 
-    # 4. Hitung Mundur Persiapan Pengguna
-    print("\n" + "=" * 50)
-    print(f"SIAP-SIAP! Mulai melakukan aktivitas: [{label_aktivitas.upper()}]")
-    print(f"Sensor dipasang di: [{posisi.upper()}], Subjek: [{subjek}]")
-    print("=" * 50)
-    for i in range(3, 0, -1):
-        print(f"Perekaman dimulai dalam... {i}")
-        time.sleep(1)
-    print(">>> PEREKAMAN DIMULAI! LAKUKAN GERAKAN SEKARANG! <<<\n")
-
-    # Buka file CSV (mode append jika file sudah ada, atau buat baru dengan header)
-    file_exists = os.path.exists(output_filename)
-    csv_file = open(output_filename, "a", encoding="utf-8")
-    if not file_exists or os.path.getsize(output_filename) == 0:
-        csv_file.write("timestamp_ms,subjek,sesi,posisi,ax,ay,az,gx,gy,gz,label\n")
-
-    recorded_count = 0
-    start_time = time.time()
-
-    try:
-        while recorded_count < target_sampel:
-            if ser.in_waiting:
-                line = ser.readline().decode('utf-8', errors='ignore').strip()
-                # Abaikan baris komentar atau pesan inisialisasi ESP32
-                if not line or line.startswith("#") or line.startswith("=") or line.startswith("-") or "timestamp" in line:
-                    continue
-                
-                parts = line.split(",")
-                if len(parts) >= 8:
-                    # Pastikan format data valid
-                    try:
-                        t_ms = parts[0]
-                        ax, ay, az = float(parts[4]), float(parts[5]), float(parts[6])
-                        
-                        # Cek apakah sensor terbaca nol semua
-                        if ax == 0.0 and ay == 0.0 and az == 0.0:
-                            if recorded_count % 100 == 0:
-                                sys.stdout.write("\n[PERINGATAN] Nilai sensor 0.0 semua! Sensor MPU-6050 tidak terdeteksi. Periksa kabel SDA (21), SCL (22), VCC, dan GND!\n")
-                        
-                        # Susun baris rapi
-                        row_str = f"{t_ms},{subjek},{sesi},{posisi},{parts[4]},{parts[5]},{parts[6]},{parts[7]},{parts[8]},{parts[9]},{label_aktivitas}\n"
-                        csv_file.write(row_str)
-                        recorded_count += 1
-
-                        # Tampilkan progress bar interaktif di terminal
-                        percent = (recorded_count / target_sampel) * 100
-                        bar_len = 30
-                        filled = int(bar_len * recorded_count // target_sampel)
-                        bar = "█" * filled + "░" * (bar_len - filled)
-                        elapsed = time.time() - start_time
-                        sys.stdout.write(f"\rProg: [{bar}] {recorded_count}/{target_sampel} ({percent:.1f}%) | {elapsed:.1f}s | ax:{ax:+.2f} ay:{ay:+.2f} az:{az:+.2f}")
-                        sys.stdout.flush()
-                    except (ValueError, IndexError):
-                        continue
-    except KeyboardInterrupt:
-        print("\n[PERINGATAN] Perekaman dihentikan lebih awal oleh pengguna!")
-    finally:
-        csv_file.close()
-        ser.close()
-
-    print("\n\n" + "=" * 65)
-    print(f"[SUKSES] Berhasil merekam {recorded_count} sampel aktivitas '{label_aktivitas}'!")
-    print(f"Data tersimpan di berkas: {output_filename}")
-    print("=" * 65)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    first_timestamp = samples[0][0]
+    with output_path.open("a", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        if csv_file.tell() == 0:
+            writer.writerow(CSV_HEADER)
+        writer.writerows((timestamp - first_timestamp, subjek, sesi, posisi, *values, label_aktivitas)
+                         for timestamp, values in samples)
+    print(f"\nTersimpan {len(samples)}/{target_sampel} sampel valid di {output_path}")
 
     # Opsi konversi ke XLSX jika ada pandas/openpyxl
     try:
         import pandas as pd
-        df = pd.read_csv(output_filename)
+        df = pd.read_csv(output_path)
         xlsx_name = output_path.with_suffix(".xlsx")
         df.to_excel(xlsx_name, index=False)
         print(f"[INFO] Berkas Excel diperbarui: {xlsx_name}")

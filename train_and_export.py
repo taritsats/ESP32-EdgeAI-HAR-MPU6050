@@ -56,7 +56,7 @@ def fmt_arr_2d(arr, name):
     res += "};\n\n"
     return res
 
-def export_model(model, output_dir, dataset_sha256):
+def export_model(model, header_path, dataset_sha256, accel_unit):
     sc = model["standardscaler"]
     mlp = model["mlpclassifier"]
     W1, W2, W3 = mlp.coefs_
@@ -80,6 +80,7 @@ def export_model(model, output_dir, dataset_sha256):
         "#define NUM_CLASSES 3",
         "#define H1_SIZE 16",
         "#define H2_SIZE 8",
+        f"#define MODEL_ACCEL_G_TO_UNIT {9.80665 if accel_unit == 'm/s2' else 1.0}f",
         "",
         "// Parameter Normalisasi Fitur (StandardScaler: mu & sigma)",
         fmt_arr_1d(sc.mean_, "SCALER_MEAN"),
@@ -158,26 +159,30 @@ def export_model(model, output_dir, dataset_sha256):
     ]
 
 
-    header = "\n".join(lines)
-    for folder in (output_dir, output_dir / "ESP32_Edge_Inference_MPU6050"):
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "model_weights.h").write_text(header, encoding="utf-8", newline="\n")
+    header_path.parent.mkdir(parents=True, exist_ok=True)
+    header_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluasi HAR per subjek dan ekspor model ESP32.")
     parser.add_argument("--dataset", type=Path, default=DEMO_DATASET)
+    parser.add_argument("--accel-unit", choices=("g", "m/s2"),
+                        help="Satuan ax, ay, az pada CSV. Default: m/s2 untuk demo, g untuk CSV lain.")
     parser.add_argument("--output-dir", type=Path,
                         help="Default: repositori untuk demo, data_local/training untuk CSV lain.")
     args = parser.parse_args()
     dataset = args.dataset.resolve()
     is_demo = dataset == DEMO_DATASET
-    output = args.output_dir or (ROOT if is_demo else ROOT / "data_local" / "training")
+    accel_unit = args.accel_unit or ("m/s2" if is_demo else "g")
+    output = (args.output_dir or (ROOT if is_demo else ROOT / "data_local" / "training")).resolve()
+    header_dir = output / "ESP32_Edge_Inference_MPU6050" if output == ROOT else output
+    header_path = header_dir / "model_weights.h"
 
     csv_bytes = dataset.read_bytes()
     data = read_recordings(BytesIO(csv_bytes))
     scores, truth, predictions = evaluate_folds(subject_folds(data))
     print(f"Dataset: {dataset.name}" + (" (demo sintetis)" if is_demo else ""))
+    print(f"Satuan akselerasi pada CSV: {accel_unit}")
     for fold, (_, train_count, test_count, accuracy) in enumerate(scores, 1):
         print(f"Fold {fold}: latih={train_count}, uji={test_count}, akurasi={accuracy:.2%}")
     print(f"Akurasi gabungan ({len(truth)} jendela): {accuracy_score(truth, predictions):.2%}")
@@ -187,8 +192,8 @@ def main():
     features, labels = extract_windows(data)
     model = make_mlp().fit(features, labels)
     save_figures(model, truth, predictions, output / "images")
-    export_model(model, output, hashlib.sha256(csv_bytes).hexdigest())
-    print(f"Bobot dari seluruh subjek diekspor ke {output}")
+    export_model(model, header_path, hashlib.sha256(csv_bytes).hexdigest(), accel_unit)
+    print(f"Bobot dari seluruh subjek diekspor ke {header_path}")
 
 
 if __name__ == "__main__":

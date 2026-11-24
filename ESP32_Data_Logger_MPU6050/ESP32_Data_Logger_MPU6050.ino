@@ -18,105 +18,91 @@
  * Konfigurasi Pin I2C ESP32:
  *   - SDA : GPIO 21
  *   - SCL : GPIO 22
- *   - VCC : 3.3V / 5V
+ *   - VCC : 3.3V
  *   - GND : GND
  * ======================================================================================
  */
 
 #include <Wire.h>
 
-// Alamat I2C MPU-6050 (default 0x68, atau 0x69 jika AD0 HIGH)
-uint8_t MPU_ADDR = 0x68;
-bool sensorDetected = false;
+constexpr float ACCEL_SCALE = 8192.0f; // +/- 4g
+constexpr float GYRO_SCALE = 65.5f; // +/- 500 deg/s
+constexpr unsigned long SAMPLING_PERIOD_MS = 20;
+constexpr unsigned long SENSOR_RETRY_INTERVAL_MS = 1000;
+uint8_t mpuAddress = 0;
+unsigned long lastSensorAttempt = 0;
+unsigned long startTimestamp = 0;
+unsigned long lastSampleTime = 0;
+const char* currentLabel = "diam";
+bool isLogging = true;
 
-// Inisialisasi Sensor MPU-6050
-bool setupMPU6050() {
-  Wire.begin(21, 22); // SDA = GPIO21, SCL = GPIO22
-  Wire.setClock(400000); // Fast I2C 400 kHz
+bool writeMPURegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
 
-  // Cek apakah sensor ada di 0x68
-  Wire.beginTransmission(0x68);
-  if (Wire.endTransmission() == 0) {
-    MPU_ADDR = 0x68;
-    sensorDetected = true;
-  } else {
-    // Coba cek alamat alternatif 0x69
-    Wire.beginTransmission(0x69);
-    if (Wire.endTransmission() == 0) {
-      MPU_ADDR = 0x69;
-      sensorDetected = true;
-      Serial.println("[INFO] Sensor terdeteksi di alamat alternatif 0x69!");
-    } else {
-      sensorDetected = false;
-      Serial.println("\n**************************************************************");
-      Serial.println("[ERROR FATAL] SENSOR MPU-6050 TIDAK TERDETEKSI PADA I2C!");
-      Serial.println("Penyebab:");
-      Serial.println("  1. Kabel SDA (GPIO 21) atau SCL (GPIO 22) kendor / terbalik.");
-      Serial.println("  2. Kabel VCC (3.3V) atau GND belum terhubung.");
-      Serial.println("Data akan bernilai 0.0 sampai kabel diperbaiki.");
-      Serial.println("**************************************************************\n");
-      return false;
-    }
+bool readMPURegisters(uint8_t address, uint8_t reg, uint8_t* bytes, size_t count) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(address, count, true) != count) {
+    return false;
   }
-
-  // Bangunkan MPU-6050 dari mode Sleep (Power Management 1)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B); // Register PWR_MGMT_1
-  Wire.write(0x00); // Bangunkan MPU6050
-  Wire.endTransmission(true);
-
-  // Konfigurasi Accelerometer ke Rentang +/- 4g (Register ACCEL_CONFIG 0x1C)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x1C);
-  Wire.write(0x08);
-  Wire.endTransmission(true);
-
-  // Konfigurasi Gyroscope ke Rentang +/- 500 deg/s (Register GYRO_CONFIG 0x1B)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x1B);
-  Wire.write(0x08);
-  Wire.endTransmission(true);
-
-  // Low Pass Filter 44 Hz (Register CONFIG 0x1A)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x1A);
-  Wire.write(0x03);
-  Wire.endTransmission(true);
-
-  Serial.println("[OK] Sensor MPU-6050 Berhasil Dikonfigurasi!");
+  for (size_t i = 0; i < count; ++i) {
+    const int value = Wire.read();
+    if (value < 0) return false;
+    bytes[i] = static_cast<uint8_t>(value);
+  }
   return true;
 }
 
-// Membaca Data Akselerasi dan Rotasi Mentah
-void readMPU6050(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B); // Memulai pembacaan dari ACCEL_XOUT_H
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true); // Baca 14 byte register secara berurutan
-
-  if (Wire.available() >= 14) {
-    int16_t raw_ax = (Wire.read() << 8) | Wire.read();
-    int16_t raw_ay = (Wire.read() << 8) | Wire.read();
-    int16_t raw_az = (Wire.read() << 8) | Wire.read();
-    int16_t raw_temp = (Wire.read() << 8) | Wire.read(); // Lewati temperatur
-    int16_t raw_gx = (Wire.read() << 8) | Wire.read();
-    int16_t raw_gy = (Wire.read() << 8) | Wire.read();
-    int16_t raw_gz = (Wire.read() << 8) | Wire.read();
-
-    // Konversi ke satuan fisik (g untuk akselerasi, deg/s untuk giroskop)
-    ax = (float)raw_ax / ACCEL_SCALE;
-    ay = (float)raw_ay / ACCEL_SCALE;
-    az = (float)raw_az / ACCEL_SCALE;
-    gx = (float)raw_gx / GYRO_SCALE;
-    gy = (float)raw_gy / GYRO_SCALE;
-    gz = (float)raw_gz / GYRO_SCALE;
+void setupMPU6050() {
+  const uint8_t addresses[] = {0x68, 0x69};
+  for (const uint8_t address : addresses) {
+    uint8_t identity = 0;
+    // WHO_AM_I tetap 0x68 pada kedua alamat I2C.
+    if (!readMPURegisters(address, 0x75, &identity, 1) || identity != 0x68) continue;
+    if (!writeMPURegister(address, 0x6B, 0x00) ||
+        !writeMPURegister(address, 0x1C, 0x08) ||
+        !writeMPURegister(address, 0x1B, 0x08) ||
+        !writeMPURegister(address, 0x1A, 0x03)) continue;
+    delay(50);
+    mpuAddress = address;
+    Serial.printf("# MPU_READY: 0x%02X\n", static_cast<unsigned int>(address));
+    return;
   }
+  Serial.println("# MPU_ERROR: MPU-6050 gagal diinisialisasi pada 0x68/0x69.");
+}
+
+int16_t readSignedWord(const uint8_t* bytes) {
+  return static_cast<int16_t>((bytes[0] << 8) | bytes[1]);
+}
+
+// Membaca Data Akselerasi dan Rotasi Mentah
+bool readMPU6050(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+  uint8_t bytes[14];
+  if (!readMPURegisters(mpuAddress, 0x3B, bytes, sizeof bytes)) return false;
+
+  const int16_t x = readSignedWord(bytes);
+  const int16_t y = readSignedWord(bytes + 2);
+  const int16_t z = readSignedWord(bytes + 4);
+  if (x == 0 && y == 0 && z == 0) return false;
+
+  ax = x / ACCEL_SCALE;
+  ay = y / ACCEL_SCALE;
+  az = z / ACCEL_SCALE;
+  gx = readSignedWord(bytes + 8) / GYRO_SCALE;
+  gy = readSignedWord(bytes + 10) / GYRO_SCALE;
+  gz = readSignedWord(bytes + 12) / GYRO_SCALE;
+  return true;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  Wire.begin(21, 22, static_cast<uint32_t>(100000));
   setupMPU6050();
 
   Serial.println("\n=======================================================");
@@ -131,7 +117,8 @@ void setup() {
   Serial.println("timestamp_ms,subjek,sesi,posisi,ax,ay,az,gx,gy,gz,label");
 
   startTimestamp = millis();
-  lastSampleTime = millis();
+  lastSampleTime = startTimestamp;
+  lastSensorAttempt = startTimestamp;
 }
 
 void loop() {
@@ -156,35 +143,26 @@ void loop() {
 
   // Pengambilan data periodik dengan presisi 50 Hz (interval 20 ms)
   unsigned long currentMillis = millis();
-  if (isLogging && (currentMillis - lastSampleTime >= SAMPLING_PERIOD_MS)) {
-    lastSampleTime += SAMPLING_PERIOD_MS;
-    unsigned long timeElapsed = currentMillis - startTimestamp;
-
-    float ax = 0, ay = 0, az = 0;
-    float gx = 0, gy = 0, gz = 0;
-    readMPU6050(ax, ay, az, gx, gy, gz);
-
-    // Cetak format CSV ke Serial Monitor
-    Serial.print(timeElapsed);
-    Serial.print(",");
-    Serial.print(currentSubjek);
-    Serial.print(",");
-    Serial.print(currentSesi);
-    Serial.print(",");
-    Serial.print(currentPosisi);
-    Serial.print(",");
-    Serial.print(ax, 4);
-    Serial.print(",");
-    Serial.print(ay, 4);
-    Serial.print(",");
-    Serial.print(az, 4);
-    Serial.print(",");
-    Serial.print(gx, 2);
-    Serial.print(",");
-    Serial.print(gy, 2);
-    Serial.print(",");
-    Serial.print(gz, 2);
-    Serial.print(",");
-    Serial.println(currentLabel);
+  if (!isLogging) return;
+  if (mpuAddress == 0) {
+    if (currentMillis - lastSensorAttempt >= SENSOR_RETRY_INTERVAL_MS) {
+      lastSensorAttempt = currentMillis;
+      setupMPU6050();
+      lastSampleTime = millis();
+    }
+    return;
   }
+  if (currentMillis - lastSampleTime < SAMPLING_PERIOD_MS) return;
+  lastSampleTime = currentMillis;
+
+  float ax, ay, az, gx, gy, gz;
+  if (!readMPU6050(ax, ay, az, gx, gy, gz)) {
+    mpuAddress = 0;
+    lastSensorAttempt = currentMillis;
+    Serial.println("# MPU_ERROR: Pembacaan I2C gagal atau ketiga sumbu akselerasi nol.");
+    return;
+  }
+  // Metadata contoh untuk Serial Monitor. record_dataset.py memakai isian operator.
+  Serial.printf("%lu,S01,1,pergelangan,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%s\n",
+                currentMillis - startTimestamp, ax, ay, az, gx, gy, gz, currentLabel);
 }

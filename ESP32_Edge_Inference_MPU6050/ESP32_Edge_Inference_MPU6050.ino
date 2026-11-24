@@ -34,6 +34,11 @@
 #include <Adafruit_SSD1306.h>
 #include "model_weights.h"
 
+#ifndef MODEL_ACCEL_G_TO_UNIT
+// Header lama untuk model yang dilatih dari keluaran logger dalam g.
+#define MODEL_ACCEL_G_TO_UNIT 1.0f
+#endif
+
 // -----------------------------------------------------------------------------
 // KONFIGURASI JARINGAN WIFI & CLOUD IOT RESLAB CSUB
 // -----------------------------------------------------------------------------
@@ -58,9 +63,12 @@ String cloudStatus = "Init";
 #define OLED_RESET    -1
 #define OLED_ADDR     0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool displayReady = false;
 
-#define MPU_ADDR 0x68
-const float ACCEL_SCALE = 8192.0f; // Rentang +/- 4g (8192 LSB/g)
+constexpr float ACCEL_COUNTS_PER_G = 8192.0f; // Rentang +/- 4g
+constexpr unsigned long SENSOR_RETRY_INTERVAL_MS = 1000;
+uint8_t mpuAddress = 0;
+unsigned long lastSensorAttempt = 0;
 
 #define PIN_BUZZER 18
 
@@ -81,7 +89,8 @@ int sampleCount = 0;
 int samplesSinceLastInference = 0;
 
 // Variabel status inferensi terkini
-int currentActivityIndex = 0; // 0 = DIAM, 1 = JALAN, 2 = LARI
+constexpr int NO_PREDICTION = -1;
+int currentActivityIndex = NO_PREDICTION; // 0 = DIAM, 1 = JALAN, 2 = LARI
 float currentConfidence = 0.0f;
 unsigned long lastInferenceLatencyUs = 0;
 unsigned long buzzerTimer = 0;
@@ -89,41 +98,58 @@ unsigned long buzzerTimer = 0;
 // =============================================================================
 // INISIALISASI MPU-6050
 // =============================================================================
-void initMPU6050() {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B); // Register Power Management 1
-  Wire.write(0x00); // Bangunkan MPU-6050
-  Wire.endTransmission(true);
-
-  // Konfigurasi Accelerometer +/- 4g (Register 0x1C)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x1C);
-  Wire.write(0x08);
-  Wire.endTransmission(true);
-
-  // Filter Digital Low-Pass 44 Hz (Register 0x1A)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x1A);
-  Wire.write(0x03);
-  Wire.endTransmission(true);
+bool writeMPURegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
 }
 
-// Membaca Data Akselerasi 3-Sumbu (Satuan g)
-void readAccel(float &ax, float &ay, float &az) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B); // Alamat awal ACCEL_XOUT_H
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 6, true);
-
-  if (Wire.available() >= 6) {
-    int16_t raw_x = (Wire.read() << 8) | Wire.read();
-    int16_t raw_y = (Wire.read() << 8) | Wire.read();
-    int16_t raw_z = (Wire.read() << 8) | Wire.read();
-
-    ax = (float)raw_x / ACCEL_SCALE;
-    ay = (float)raw_y / ACCEL_SCALE;
-    az = (float)raw_z / ACCEL_SCALE;
+bool readMPURegisters(uint8_t address, uint8_t reg, uint8_t* bytes, size_t count) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(address, count, true) != count) {
+    return false;
   }
+  for (size_t i = 0; i < count; ++i) {
+    const int byteValue = Wire.read();
+    if (byteValue < 0) return false;
+    bytes[i] = static_cast<uint8_t>(byteValue);
+  }
+  return true;
+}
+
+void initMPU6050() {
+  const uint8_t addresses[] = {0x68, 0x69};
+  for (const uint8_t address : addresses) {
+    uint8_t identity = 0;
+    // WHO_AM_I tetap 0x68, termasuk saat AD0 memilih alamat bus 0x69.
+    if (!readMPURegisters(address, 0x75, &identity, 1) || identity != 0x68) continue;
+    if (!writeMPURegister(address, 0x6B, 0x00) ||
+        !writeMPURegister(address, 0x1C, 0x08) ||
+        !writeMPURegister(address, 0x1A, 0x03)) continue;
+
+    delay(50);
+    mpuAddress = address;
+    Serial.printf("[MPU] Siap di 0x%02X\n", static_cast<unsigned int>(address));
+    return;
+  }
+  Serial.println("[MPU] MPU-6050 gagal diinisialisasi pada 0x68/0x69. Cek kabel dan jumper.");
+}
+
+bool readAccelG(float &ax, float &ay, float &az) {
+  uint8_t bytes[6];
+  if (!readMPURegisters(mpuAddress, 0x3B, bytes, sizeof bytes)) return false;
+
+  const int16_t x = static_cast<int16_t>((bytes[0] << 8) | bytes[1]);
+  const int16_t y = static_cast<int16_t>((bytes[2] << 8) | bytes[3]);
+  const int16_t z = static_cast<int16_t>((bytes[4] << 8) | bytes[5]);
+  if (x == 0 && y == 0 && z == 0) return false;
+
+  ax = x / ACCEL_COUNTS_PER_G;
+  ay = y / ACCEL_COUNTS_PER_G;
+  az = z / ACCEL_COUNTS_PER_G;
+  return true;
 }
 
 // =============================================================================
@@ -173,8 +199,8 @@ void extractFeatures(float features[NUM_FEATURES]) {
 // =============================================================================
 void handleBuzzer() {
   unsigned long now = millis();
-  if (currentActivityIndex == 0) {
-    // DIAM: Buzzer mati / senyap
+  if (currentActivityIndex <= 0) {
+    // DIAM atau prediksi belum tersedia.
     digitalWrite(PIN_BUZZER, LOW);
   } else if (currentActivityIndex == 1) {
     // JALAN: Bunyi ritmis tunggal pendek (100 ms ON setiap 1000 ms)
@@ -199,6 +225,7 @@ void handleBuzzer() {
 // PEMBARUAN TAMPILAN OLED SSD1306
 // =============================================================================
 void updateOLED() {
+  if (!displayReady) return;
   display.clearDisplay();
   
   // Header
@@ -210,19 +237,30 @@ void updateOLED() {
   // Status Aktivitas (Teks Besar)
   display.setCursor(0, 16);
   display.setTextSize(2);
-  display.print(CLASS_NAMES[currentActivityIndex]);
+  if (mpuAddress == 0) {
+    display.print("IMU ERROR");
+  } else if (currentActivityIndex == NO_PREDICTION) {
+    display.print("MENUNGGU");
+  } else {
+    display.print(CLASS_NAMES[currentActivityIndex]);
+  }
 
   // Metrik Inferensi
   display.setTextSize(1);
   display.setCursor(0, 36);
-  display.print("Conf: ");
-  display.print(currentConfidence * 100.0f, 1);
-  display.print("%");
-
-  display.setCursor(0, 46);
-  display.print("Latency: ");
-  display.print(lastInferenceLatencyUs);
-  display.print(" us");
+  if (mpuAddress == 0) {
+    display.print("Cek kabel / I2C");
+  } else if (currentActivityIndex == NO_PREDICTION) {
+    display.print("Mengisi buffer");
+  } else {
+    display.print("Conf: ");
+    display.print(currentConfidence * 100.0f, 1);
+    display.print("%");
+    display.setCursor(0, 46);
+    display.print("Latency: ");
+    display.print(lastInferenceLatencyUs);
+    display.print(" us");
+  }
 
   // Status Jaringan & Cloud
   display.setCursor(0, 56);
@@ -282,25 +320,18 @@ void setup() {
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
 
-  // Inisialisasi Bus I2C (SDA=21, SCL=22, Frekuensi 400 kHz)
-  Wire.begin(21, 22);
-  Wire.setClock(400000);
+  // Inisialisasi bus I2C bersama MPU-6050 dan OLED.
+  Wire.begin(21, 22, static_cast<uint32_t>(100000));
 
   // Inisialisasi Layar OLED
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+  displayReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false);
+  if (!displayReady) {
     Serial.println("[ERROR] Layar OLED SSD1306 tidak terdeteksi!");
-  } else {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(10, 20);
-    display.println("Connecting WiFi...");
-    display.display();
   }
 
   // Inisialisasi Sensor IMU MPU-6050
   initMPU6050();
-  Serial.println("[OK] Sensor MPU-6050 terhubung pada I2C 0x68.");
+  updateOLED();
 
   // Koneksi ke Jaringan WiFi
   Serial.print("[WIFI] Menghubungkan ke ");
@@ -322,77 +353,79 @@ void setup() {
   }
 
   lastSampleTime = millis();
-  Serial.println("[OK] Sistem Siap Melakukan Inferensi Real-Time.\n");
+  lastSensorAttempt = lastSampleTime;
+  updateOLED();
 }
 
 // =============================================================================
 // LOOP UTAMA
 // =============================================================================
+void sampleAndPredict() {
+  float axG, ayG, azG;
+  if (!readAccelG(axG, ayG, azG)) {
+    Serial.println("[MPU] Pembacaan I2C gagal atau seluruh sumbu nol. Mencoba menghubungkan ulang.");
+    mpuAddress = 0;
+    lastSensorAttempt = millis();
+    sampleCount = 0;
+    samplesSinceLastInference = 0;
+    currentActivityIndex = NO_PREDICTION;
+    updateOLED();
+    return;
+  }
+
+  // Geser buffer ke kiri jika sudah penuh dan gunakan satuan yang dipakai saat pelatihan.
+  int index = sampleCount;
+  if (sampleCount < WINDOW_SIZE) {
+    sampleCount++;
+  } else {
+    for (int i = 0; i < WINDOW_SIZE - 1; i++) {
+      buf_ax[i] = buf_ax[i + 1];
+      buf_ay[i] = buf_ay[i + 1];
+      buf_az[i] = buf_az[i + 1];
+    }
+    index = WINDOW_SIZE - 1;
+  }
+  buf_ax[index] = axG * MODEL_ACCEL_G_TO_UNIT;
+  buf_ay[index] = ayG * MODEL_ACCEL_G_TO_UNIT;
+  buf_az[index] = azG * MODEL_ACCEL_G_TO_UNIT;
+  samplesSinceLastInference++;
+
+  if (sampleCount < WINDOW_SIZE || samplesSinceLastInference < STEP_SIZE) return;
+  samplesSinceLastInference = 0;
+
+  float features[NUM_FEATURES];
+  extractFeatures(features);
+  float probs[NUM_CLASSES];
+  const unsigned long startTime = micros();
+  currentActivityIndex = predictActivity(features, probs);
+  lastInferenceLatencyUs = micros() - startTime;
+  currentConfidence = probs[currentActivityIndex];
+
+  Serial.printf("[INFERENSI] %s | Conf: %.1f%% | Latensi: %lu us | ax=%.3f ay=%.3f az=%.3f g\n",
+                CLASS_NAMES[currentActivityIndex], currentConfidence * 100.0f, lastInferenceLatencyUs,
+                axG, ayG, azG);
+  updateOLED();
+}
+
 void loop() {
-  unsigned long currentMillis = millis();
+  const unsigned long currentMillis = millis();
 
-  // 1. Pengambilan Data Sensor pada Frekuensi 50 Hz (Interval 20 ms)
-  if (currentMillis - lastSampleTime >= SAMPLING_PERIOD_MS) {
-    lastSampleTime += SAMPLING_PERIOD_MS;
-
-    float ax = 0, ay = 0, az = 0;
-    readAccel(ax, ay, az);
-
-    // Geser buffer ke kiri jika sudah penuh
-    if (sampleCount < WINDOW_SIZE) {
-      buf_ax[sampleCount] = ax;
-      buf_ay[sampleCount] = ay;
-      buf_az[sampleCount] = az;
-      sampleCount++;
-    } else {
-      for (int i = 0; i < WINDOW_SIZE - 1; i++) {
-        buf_ax[i] = buf_ax[i + 1];
-        buf_ay[i] = buf_ay[i + 1];
-        buf_az[i] = buf_az[i + 1];
-      }
-      buf_ax[WINDOW_SIZE - 1] = ax;
-      buf_ay[WINDOW_SIZE - 1] = ay;
-      buf_az[WINDOW_SIZE - 1] = az;
-    }
-    samplesSinceLastInference++;
-
-    // 2. Memicu Proses Inferensi Setiap STEP_SIZE (32 sampel = tiap 0.64 detik)
-    if (sampleCount >= WINDOW_SIZE && samplesSinceLastInference >= STEP_SIZE) {
-      samplesSinceLastInference = 0;
-
-      // Ekstraksi 20 Fitur Statistik
-      float features[NUM_FEATURES];
-      extractFeatures(features);
-
-      // Eksekusi Inferensi Edge MLP (Hitung Waktu dengan micros())
-      float probs[NUM_CLASSES];
-      unsigned long t_start = micros();
-      int predClass = predictActivity(features, probs);
-      unsigned long t_end = micros();
-
-      lastInferenceLatencyUs = t_end - t_start;
-      currentActivityIndex = predClass;
-      currentConfidence = probs[predClass];
-
-      // Cetak Hasil Inferensi ke Serial Monitor
-      Serial.print("[INFERENSI] Aktivitas: ");
-      Serial.print(CLASS_NAMES[currentActivityIndex]);
-      Serial.print(" | Conf: ");
-      Serial.print(currentConfidence * 100.0f, 1);
-      Serial.print("% | Latensi: ");
-      Serial.print(lastInferenceLatencyUs);
-      Serial.println(" us");
-
-      // Perbarui Tampilan OLED
-      updateOLED();
-    }
+  if (mpuAddress == 0 && currentMillis - lastSensorAttempt >= SENSOR_RETRY_INTERVAL_MS) {
+    lastSensorAttempt = currentMillis;
+    initMPU6050();
+    lastSampleTime = millis();
+    updateOLED();
+  } else if (mpuAddress != 0 && currentMillis - lastSampleTime >= SAMPLING_PERIOD_MS) {
+    lastSampleTime = currentMillis;
+    sampleAndPredict();
   }
 
   // 3. Kontrol Nada Buzzer Berdasarkan Status Gerak
   handleBuzzer();
 
   // 4. Pengiriman Telemetri Berkala ke Platform IoT ResLab CSUB
-  if (currentMillis - lastCloudSendTime >= CLOUD_SEND_INTERVAL_MS) {
+  if (currentActivityIndex != NO_PREDICTION &&
+      currentMillis - lastCloudSendTime >= CLOUD_SEND_INTERVAL_MS) {
     lastCloudSendTime = currentMillis;
     sendTelemetryToResLab();
     updateOLED(); // Perbarui status cloud pada OLED

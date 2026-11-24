@@ -16,6 +16,7 @@
 #define NUM_CLASSES 3
 #define H1_SIZE 16
 #define H2_SIZE 8
+#define MODEL_ACCEL_G_TO_UNIT 9.80665f
 
 // Parameter Normalisasi Fitur (StandardScaler: mu & sigma)
 const float SCALER_MEAN[20] = {

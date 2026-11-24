@@ -76,7 +76,7 @@ Seluruh tahapan eksplorasi data, rekayasa fitur, dan pelatihan model terdokument
    * Lapisan Tersembunyi 2: 8 neuron (Aktivasi ReLU).
    * Lapisan Keluaran: 3 neuron (Aktivasi Softmax: `DIAM`, `JALAN`, `LARI`).
 5. **Evaluasi sintetis:** MLP mencapai akurasi 100% di tiga fold, masing-masing dengan 552 jendela dari subjek yang ditahan. Angka ini mengukur performa pada sinyal sintetis. Ukur akurasi penggunaan nyata dengan data MPU-6050 dari subjek baru.
-6. **Ekspor:** Setelah evaluasi, MLP dilatih ulang dari seluruh input. Skrip menulis dua header yang identik dan mencantumkan SHA-256 CSV pelatihan di dalamnya. Prediksi tiap fold menjadi dasar metrik evaluasi.
+6. **Ekspor:** Setelah evaluasi, MLP dilatih ulang dari seluruh input. Skrip mengekspor satu `model_weights.h` yang mencantumkan SHA-256 CSV pelatihan. Prediksi tiap fold menjadi dasar metrik evaluasi.
 
 ---
 
@@ -121,7 +121,6 @@ TUGAS BESAR/
 ├── Laporan_Pengujian_Klasifikasi_Aktivitas_ESP32.docx# Laporan evaluasi dan protokol uji fisik (Word)
 ├── PANDUAN_STEP_BY_STEP_PERCOBAAN.pdf  # Panduan operasional langkah-demi-langkah (PDF)
 ├── PANDUAN_STEP_BY_STEP_PERCOBAAN.docx # Panduan operasional langkah-demi-langkah (Word)
-├── model_weights.h                     # Salinan header bobot model untuk deployment
 ├── record_dataset.py                   # Script Python untuk merekam data via Serial Port PC
 ├── train_and_export.py                 # Script otomasi retraining model & export C-header
 └── README.md                           # Dokumentasi proyek GitHub
@@ -138,7 +137,7 @@ Untuk menjalankan notebook, instal juga `jupyter`.
 ### 1. Perekaman Data Primer Mandiri (Opsional)
 Jika ingin merekam data tambahan secara langsung:
 ```bash
-# Upload ESP32_Data_Logger_MPU6050.ino ke ESP32 via Arduino IDE
+# Upload ESP32_Data_Logger_MPU6050/ESP32_Data_Logger_MPU6050.ino via Arduino IDE
 # Jalankan script perekam otomatis di terminal komputer:
 python record_dataset.py
 ```
@@ -146,6 +145,12 @@ Masukkan ID peserta samaran yang sama untuk semua sesi orang tersebut dan ID ber
 untuk setiap peserta lain. Pilih aktivitas dan durasi. Skrip menyimpan rekaman di
 `data_local/rekaman_aktivitas.csv` dan membuat salinan Excel jika dependensinya tersedia.
 Git mengabaikan folder `data_local/`.
+
+Untuk mengecek sensor sebelum merekam, buka Serial Monitor di **115200 baud**.
+Logger mencetak `# MPU_READY: 0x68` atau `0x69` saat sensor siap. Saat alat diam,
+magnitudo akselerasi seharusnya sekitar `1 g`. Jika muncul `# MPU_ERROR`, periksa
+kabel I²C, suplai, dan jumper `JP 6050` jika memakai shield. Tutup Serial Monitor
+sebelum menjalankan `record_dataset.py`. Skrip mencatat hanya sampel valid.
 
 ### 2. Pelatihan Ulang Model (Retraining)
 Buka dan jalankan seluruh sel pada notebook:
@@ -156,7 +161,7 @@ Atau jalankan skrip cepat melalui CLI:
 ```bash
 python train_and_export.py
 ```
-Perintah itu memperbarui bobot demo. Untuk rekaman lokal, jalankan:
+Perintah itu memperbarui [header bobot demo](ESP32_Edge_Inference_MPU6050/model_weights.h) di folder sketch. Untuk rekaman lokal, jalankan:
 
 ```bash
 python train_and_export.py --dataset data_local/rekaman_aktivitas.csv
@@ -166,6 +171,11 @@ Artefak dari rekaman lokal tersimpan di `data_local/training/`. Untuk memasang
 model hasil rekaman, gunakan header dari folder tersebut dalam salinan lokal
 sketch inferensi. Rekam ketiga aktivitas pada beberapa subjek, dan sisihkan
 peserta baru untuk uji akhir setelah memilih model.
+
+Firmware logger menyimpan akselerasi dalam `g`, sementara CSV demo memakai
+`m/s²`. Jika memakai CSV lain yang satuannya `m/s²`, tambahkan
+`--accel-unit m/s2` saat mengekspor. Header bobot menyimpan faktor konversi
+yang dipakai firmware.
 
 ### 3. Deployment & Inferensi pada ESP32
 1. Buka Arduino IDE.
@@ -180,6 +190,12 @@ peserta baru untuk uji akhir setelah memilih model.
    * Saat alat digenggam diam $\to$ OLED menampilkan **`DIAM`** (Buzzer senyap).
    * Saat berjalan dengan ayunan tangan normal $\to$ OLED menampilkan **`JALAN`** (Buzzer bip 1x).
    * Saat berlari/jogging dengan tempo cepat $\to$ OLED menampilkan **`LARI`** (Buzzer bip cepat 3x).
+
+Jika OLED menunjukkan `IMU ERROR`, buka Serial Monitor pada **115200 baud**.
+Firmware mencoba alamat I²C `0x68` dan `0x69` dan mencetak nilai akselerasi
+dalam `g` setiap kali menghasilkan prediksi. Di posisi diam, magnitudo
+akselerasi seharusnya sekitar `1 g`. Pastikan pin SDA/GPIO 21, SCL/GPIO 22,
+VCC 3,3 V, GND, dan jumper `JP 6050` jika memakai shield.
 
 ### 4. Telemetri Cloud & Notifikasi Pengguna
 1. Buka dashboard pada [https://iot.reslab-csub.cloud/](https://iot.reslab-csub.cloud/).

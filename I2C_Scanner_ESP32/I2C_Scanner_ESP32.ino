@@ -36,7 +36,7 @@ void loop() {
       if (address == 0x68) {
         Serial.print(" (Sensor MPU-6050 OK!)");
       } else if (address == 0x69) {
-        Serial.print(" (Sensor MPU-6050 Alamat Alternatif 0x69, hubungkan AD0 ke GND)");
+        Serial.print(" (Alamat alternatif MPU-6050, AD0 HIGH)");
       } else if (address == 0x3C || address == 0x3D) {
         Serial.print(" (Layar OLED SSD1306 OK!)");
       }
