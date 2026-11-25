@@ -8,12 +8,14 @@ import seaborn as sns
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 from har_pipeline import (
-    CLASSES, CLASS_IDS, evaluate_folds, extract_windows, make_mlp,
-    read_recordings, subject_folds,
+    CLASSES, CLASS_IDS, evaluation_folds, evaluate_folds, extract_windows,
+    infer_accel_unit, make_mlp, read_recordings,
 )
 
 ROOT = Path(__file__).resolve().parent
+REAL_DATASET = ROOT / "dataset_aktivitas.csv"
 DEMO_DATASET = ROOT / "dataset_aktivitas_primer.csv"
+DEFAULT_DATASET = REAL_DATASET if REAL_DATASET.exists() else DEMO_DATASET
 
 
 def save_figures(model, truth, predictions, images):
@@ -31,7 +33,7 @@ def save_figures(model, truth, predictions, images):
     matrix = confusion_matrix(truth, predictions, labels=CLASS_IDS)
     sns.heatmap(matrix, annot=True, fmt="d", cmap="Blues", cbar=False,
                 xticklabels=CLASSES, yticklabels=CLASSES, ax=ax)
-    ax.set(title="Matriks Konfusi MLP (Subjek Terpisah)",
+    ax.set(title="Matriks Konfusi MLP (Validasi Bebas Kebocoran)",
            xlabel="Prediksi model", ylabel="Label sebenarnya")
     fig.tight_layout()
     fig.savefig(images / "gambar4_matriks_konfusi_mlp.png", dpi=300)
@@ -164,27 +166,29 @@ def export_model(model, header_path, dataset_sha256, accel_unit):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluasi HAR per subjek dan ekspor model ESP32.")
-    parser.add_argument("--dataset", type=Path, default=DEMO_DATASET)
+    parser = argparse.ArgumentParser(description="Evaluasi HAR bebas kebocoran dan ekspor model ESP32.")
+    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--accel-unit", choices=("g", "m/s2"),
-                        help="Satuan ax, ay, az pada CSV. Default: m/s2 untuk demo, g untuk CSV lain.")
+                        help="Satuan ax, ay, az pada CSV. Default: terdeteksi otomatis dari magnitudo.")
     parser.add_argument("--output-dir", type=Path,
-                        help="Default: repositori untuk demo, data_local/training untuk CSV lain.")
+                        help="Default: repositori untuk dataset utama/demo, data_local/training untuk CSV lain.")
     args = parser.parse_args()
     dataset = args.dataset.resolve()
+    is_repo_dataset = dataset in (REAL_DATASET, DEMO_DATASET)
     is_demo = dataset == DEMO_DATASET
-    accel_unit = args.accel_unit or ("m/s2" if is_demo else "g")
-    output = (args.output_dir or (ROOT if is_demo else ROOT / "data_local" / "training")).resolve()
+    output = (args.output_dir or (ROOT if is_repo_dataset else ROOT / "data_local" / "training")).resolve()
     header_dir = output / "ESP32_Edge_Inference_MPU6050" if output == ROOT else output
     header_path = header_dir / "model_weights.h"
 
     csv_bytes = dataset.read_bytes()
     data = read_recordings(BytesIO(csv_bytes))
-    scores, truth, predictions = evaluate_folds(subject_folds(data))
-    print(f"Dataset: {dataset.name}" + (" (demo sintetis)" if is_demo else ""))
+    accel_unit = args.accel_unit or infer_accel_unit(data)
+    scores, truth, predictions = evaluate_folds(evaluation_folds(data))
+    tag = " (demo sintetis)" if is_demo else (" (data primer asli)" if dataset == REAL_DATASET else "")
+    print(f"Dataset: {dataset.name}{tag}")
     print(f"Satuan akselerasi pada CSV: {accel_unit}")
-    for fold, (_, train_count, test_count, accuracy) in enumerate(scores, 1):
-        print(f"Fold {fold}: latih={train_count}, uji={test_count}, akurasi={accuracy:.2%}")
+    for fold, (fold_name, train_count, test_count, accuracy) in enumerate(scores, 1):
+        print(f"Fold {fold} ({fold_name}): latih={train_count}, uji={test_count}, akurasi={accuracy:.2%}")
     print(f"Akurasi gabungan ({len(truth)} jendela): {accuracy_score(truth, predictions):.2%}")
     print(classification_report(truth, predictions, labels=CLASS_IDS,
                                 target_names=CLASSES, zero_division=0))
@@ -193,7 +197,7 @@ def main():
     model = make_mlp().fit(features, labels)
     save_figures(model, truth, predictions, output / "images")
     export_model(model, header_path, hashlib.sha256(csv_bytes).hexdigest(), accel_unit)
-    print(f"Bobot dari seluruh subjek diekspor ke {header_path}")
+    print(f"Bobot dari seluruh rekaman diekspor ke {header_path}")
 
 
 if __name__ == "__main__":

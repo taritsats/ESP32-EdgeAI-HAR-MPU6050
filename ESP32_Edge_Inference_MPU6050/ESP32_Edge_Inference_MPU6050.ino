@@ -1,7 +1,7 @@
 /*
  * ======================================================================================
  * SISTEM EDGE AI KLASIFIKASI AKTIVITAS MANUSIA (DIAM, JALAN, LARI)
- * BERBASIS ESP32, SENSOR MPU-6050, OLED SSD1306, DAN BUZZER
+ * BERBASIS ESP32, SENSOR MPU-6050, DAN BUZZER
  * --------------------------------------------------------------------------------------
  * Mata Kuliah : Edge Intelligent and Computing (CCE60306)
  * Laboratorium: CSUB - Robotic and Embedded Systems Laboratory (RESLAB FILKOM UB)
@@ -13,16 +13,15 @@
  * 3. Ekstraksi 20 fitur statistik domain waktu secara lokal (mean, std, min, max, rms).
  * 4. Normalisasi fitur Z-score (StandardScaler) langsung di dalam mikrokontroler.
  * 5. Inferensi lokal Edge TinyML (MLP Neural Network 20 -> 16 -> 8 -> 3) dengan latensi < 0.25 ms.
- * 6. Tampilan hasil inferensi (Label, Confidence, Latensi) pada layar OLED 0.96" SSD1306.
- * 7. Indikator audio adaptif menggunakan Buzzer (pola nada berbeda untuk Diam, Jalan, Lari).
- * 8. Pengiriman telemetri hasil klasifikasi secara berkala ke platform IoT ResLab CSUB via HTTP REST.
+ * 6. Indikator audio adaptif menggunakan Buzzer (pola nada berbeda untuk Diam, Jalan, Lari).
+ * 7. Pengiriman telemetri hasil klasifikasi secara berkala ke platform IoT ResLab CSUB via HTTP REST.
  *
  * Konfigurasi Pinout Perangkat Keras:
- *   - ESP32 SDA      : GPIO 21 (Terhubung ke SDA MPU-6050 & SDA OLED SSD1306)
- *   - ESP32 SCL      : GPIO 22 (Terhubung ke SCL MPU-6050 & SCL OLED SSD1306)
- *   - ESP32 Buzzer   : GPIO 18 (Pin Positif Buzzer Aktif melalui resistor/transistor)
- *   - VCC            : 3.3V (MPU-6050 dan OLED SSD1306)
- *   - GND            : GND bersama (ESP32, MPU-6050, OLED, Buzzer)
+ *   - ESP32 SDA      : GPIO 21 (Terhubung ke SDA MPU-6050)
+ *   - ESP32 SCL      : GPIO 22 (Terhubung ke SCL MPU-6050)
+ *   - ESP32 Buzzer   : GPIO 25 (Pin Positif Buzzer Aktif)
+ *   - VCC            : 3.3V (MPU-6050)
+ *   - GND            : GND bersama (ESP32, MPU-6050, Buzzer)
  * ======================================================================================
  */
 
@@ -30,8 +29,6 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include "model_weights.h"
 
 #ifndef MODEL_ACCEL_G_TO_UNIT
@@ -56,21 +53,16 @@ unsigned long lastCloudSendTime = 0;
 String cloudStatus = "Init";
 
 // -----------------------------------------------------------------------------
-// KONFIGURASI PERANGKAT KERAS (OLED, BUZZER, SENSOR)
+// KONFIGURASI PERANGKAT KERAS (BUZZER, SENSOR MPU-6050)
 // -----------------------------------------------------------------------------
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET    -1
-#define OLED_ADDR     0x3C
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-bool displayReady = false;
+#define PIN_SDA 21
+#define PIN_SCL 22
+#define PIN_BUZZER 25
 
 constexpr float ACCEL_COUNTS_PER_G = 8192.0f; // Rentang +/- 4g
 constexpr unsigned long SENSOR_RETRY_INTERVAL_MS = 1000;
 uint8_t mpuAddress = 0;
 unsigned long lastSensorAttempt = 0;
-
-#define PIN_BUZZER 18
 
 // -----------------------------------------------------------------------------
 // PARAMETER SLIDING WINDOW BUFFER & FREKUENSI CUPLIK
@@ -202,9 +194,10 @@ void handleBuzzer() {
   if (currentActivityIndex <= 0) {
     // DIAM atau prediksi belum tersedia.
     digitalWrite(PIN_BUZZER, LOW);
+    buzzerTimer = now;
   } else if (currentActivityIndex == 1) {
-    // JALAN: Bunyi ritmis tunggal pendek (100 ms ON setiap 1000 ms)
-    if (now - buzzerTimer < 100) {
+    // JALAN: Bunyi ritmis tunggal pendek (120 ms ON setiap 1000 ms)
+    if (now - buzzerTimer < 120) {
       digitalWrite(PIN_BUZZER, HIGH);
     } else if (now - buzzerTimer < 1000) {
       digitalWrite(PIN_BUZZER, LOW);
@@ -219,55 +212,6 @@ void handleBuzzer() {
       digitalWrite(PIN_BUZZER, LOW);
     }
   }
-}
-
-// =============================================================================
-// PEMBARUAN TAMPILAN OLED SSD1306
-// =============================================================================
-void updateOLED() {
-  if (!displayReady) return;
-  display.clearDisplay();
-  
-  // Header
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("--- EDGE AI HAR ---");
-
-  // Status Aktivitas (Teks Besar)
-  display.setCursor(0, 16);
-  display.setTextSize(2);
-  if (mpuAddress == 0) {
-    display.print("IMU ERROR");
-  } else if (currentActivityIndex == NO_PREDICTION) {
-    display.print("MENUNGGU");
-  } else {
-    display.print(CLASS_NAMES[currentActivityIndex]);
-  }
-
-  // Metrik Inferensi
-  display.setTextSize(1);
-  display.setCursor(0, 36);
-  if (mpuAddress == 0) {
-    display.print("Cek kabel / I2C");
-  } else if (currentActivityIndex == NO_PREDICTION) {
-    display.print("Mengisi buffer");
-  } else {
-    display.print("Conf: ");
-    display.print(currentConfidence * 100.0f, 1);
-    display.print("%");
-    display.setCursor(0, 46);
-    display.print("Latency: ");
-    display.print(lastInferenceLatencyUs);
-    display.print(" us");
-  }
-
-  // Status Jaringan & Cloud
-  display.setCursor(0, 56);
-  display.print("Cloud: ");
-  display.print(cloudStatus);
-
-  display.display();
 }
 
 // =============================================================================
@@ -316,22 +260,17 @@ void setup() {
   delay(500);
   Serial.println("\n[SYSTEM] Inisialisasi Sistem Klasifikasi Aktivitas Edge AI...");
 
-  // Inisialisasi Pin Buzzer
+  // Inisialisasi Pin Buzzer & bunyi uji singkat 100 ms saat boot
   pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, HIGH);
+  delay(100);
   digitalWrite(PIN_BUZZER, LOW);
 
-  // Inisialisasi bus I2C bersama MPU-6050 dan OLED.
-  Wire.begin(21, 22, static_cast<uint32_t>(100000));
-
-  // Inisialisasi Layar OLED
-  displayReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false);
-  if (!displayReady) {
-    Serial.println("[ERROR] Layar OLED SSD1306 tidak terdeteksi!");
-  }
+  // Inisialisasi bus I2C MPU-6050 (SDA = GPIO 21, SCL = GPIO 22)
+  Wire.begin(PIN_SDA, PIN_SCL, static_cast<uint32_t>(100000));
 
   // Inisialisasi Sensor IMU MPU-6050
   initMPU6050();
-  updateOLED();
 
   // Koneksi ke Jaringan WiFi
   Serial.print("[WIFI] Menghubungkan ke ");
@@ -354,7 +293,6 @@ void setup() {
 
   lastSampleTime = millis();
   lastSensorAttempt = lastSampleTime;
-  updateOLED();
 }
 
 // =============================================================================
@@ -369,7 +307,6 @@ void sampleAndPredict() {
     sampleCount = 0;
     samplesSinceLastInference = 0;
     currentActivityIndex = NO_PREDICTION;
-    updateOLED();
     return;
   }
 
@@ -404,7 +341,6 @@ void sampleAndPredict() {
   Serial.printf("[INFERENSI] %s | Conf: %.1f%% | Latensi: %lu us | ax=%.3f ay=%.3f az=%.3f g\n",
                 CLASS_NAMES[currentActivityIndex], currentConfidence * 100.0f, lastInferenceLatencyUs,
                 axG, ayG, azG);
-  updateOLED();
 }
 
 void loop() {
@@ -414,7 +350,6 @@ void loop() {
     lastSensorAttempt = currentMillis;
     initMPU6050();
     lastSampleTime = millis();
-    updateOLED();
   } else if (mpuAddress != 0 && currentMillis - lastSampleTime >= SAMPLING_PERIOD_MS) {
     lastSampleTime = currentMillis;
     sampleAndPredict();
@@ -428,6 +363,5 @@ void loop() {
       currentMillis - lastCloudSendTime >= CLOUD_SEND_INTERVAL_MS) {
     lastCloudSendTime = currentMillis;
     sendTelemetryToResLab();
-    updateOLED(); // Perbarui status cloud pada OLED
   }
 }
